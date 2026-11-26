@@ -1,0 +1,164 @@
+diff --git a/create_map_poster.py b/create_map_poster.py
+index 3eab412..8aff86f 100755
+--- a/create_map_poster.py
++++ b/create_map_poster.py
+@@ -406,6 +406,9 @@ def get_crop_limits(g_proj, center_lat_lon, fig, dist):
+     )
+ 
+ 
++OVERPASS_ENDPOINTS = ["https://overpass-api.de/api", "https://overpass.kumi.systems/api", "https://maps.mail.ru/osm/tools/overpass/api"]
++
++
+ def fetch_graph(point, dist) -> MultiDiGraph | None:
+     """
+     Fetch street network graph from OpenStreetMap.
+@@ -428,7 +431,16 @@ def fetch_graph(point, dist) -> MultiDiGraph | None:
+         return cast(MultiDiGraph, cached)
+ 
+     try:
+-        g = ox.graph_from_point(point, dist=dist, dist_type='bbox', network_type='all', truncate_by_edge=True)
++        g = None
++        for _url in OVERPASS_ENDPOINTS:  # MAPDROP_WATER_PATCH: mirror fallback
++            ox.settings.overpass_url = _url
++            try:
++                g = ox.graph_from_point(point, dist=dist, dist_type='bbox', network_type='all', truncate_by_edge=True)
++                break
++            except Exception as _e:
++                print(f"Overpass {_url} failed for graph: {str(_e)[:80]}")
++        if g is None:
++            raise RuntimeError("all Overpass mirrors failed")
+         # Rate limit between requests
+         time.sleep(0.5)
+         try:
+@@ -466,7 +478,20 @@ def fetch_features(point, dist, tags, name) -> GeoDataFrame | None:
+         return cast(GeoDataFrame, cached)
+ 
+     try:
+-        data = ox.features_from_point(point, tags=tags, dist=dist)
++        data = None
++        last_err = None
++        for _url in OVERPASS_ENDPOINTS:  # MAPDROP_WATER_PATCH: fall back across Overpass mirrors
++            ox.settings.overpass_url = _url
++            try:
++                data = ox.features_from_point(point, tags=tags, dist=dist)
++                break
++            except Exception as _e:
++                if "No matching features" in str(_e) or "InsufficientResponse" in type(_e).__name__:
++                    raise
++                last_err = _e
++                print(f"Overpass {_url} failed for {name}: {str(_e)[:80]}")
++        if data is None:
++            raise last_err
+         # Rate limit between requests
+         time.sleep(0.3)
+         try:
+@@ -479,6 +504,72 @@ def fetch_features(point, dist, tags, name) -> GeoDataFrame | None:
+         return None
+ 
+ 
++
++# MAPDROP_WATER_PATCH: sea from OSM coastlines, rivers as lines, more inland water tags
++def build_sea_polygons(point, dist, crs):
++    """Build sea polygons inside the map box from natural=coastline ways.
++
++    OSM coastline ways run with land on the LEFT and water on the RIGHT.
++    The box is cut into faces by the coastline; each face is voted sea or land
++    by probe points offset to either side of every coastline segment.
++    """
++    from shapely.geometry import box as _box, LineString, MultiLineString
++    from shapely.ops import unary_union, polygonize
++    from shapely import STRtree
++    import geopandas as gpd
++
++    coast = fetch_features(point, dist * 1.6, tags={"natural": "coastline"}, name="coastline")
++    if coast is None or coast.empty:
++        return None
++    coast = coast[coast.geometry.type.isin(["LineString", "MultiLineString"])]
++    if coast.empty:
++        return None
++    coast = coast.to_crs(crs)
++    c = gpd.GeoSeries([Point(point[1], point[0])], crs="EPSG:4326").to_crs(crs).iloc[0]
++    d = dist * 1.15
++    frame = _box(c.x - d, c.y - d, c.x + d, c.y + d)
++
++    lines = []
++    for geom in coast.geometry:
++        parts = geom.geoms if isinstance(geom, MultiLineString) else [geom]
++        lines.extend(parts)
++    if not lines:
++        return None
++    noded = unary_union([frame.boundary] + [l for l in lines if l.intersects(frame)])
++    faces = [f for f in polygonize(noded) if f.within(frame.buffer(1))]
++    if not faces:
++        return None
++
++    probes, signs = [], []
++    off = 3.0
++    for l in lines:
++        if not l.intersects(frame):
++            continue
++        coords = list(l.coords)
++        step = max(1, len(coords) // 400)
++        for i in range(0, len(coords) - 1, step):
++            (x1, y1), (x2, y2) = coords[i][:2], coords[i + 1][:2]
++            dx, dy = x2 - x1, y2 - y1
++            n = (dx * dx + dy * dy) ** 0.5
++            if n < 1e-6:
++                continue
++            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
++            rx, ry = dy / n * off, -dx / n * off
++            probes.append(Point(mx + rx, my + ry)); signs.append(1)   # right = water
++            probes.append(Point(mx - rx, my - ry)); signs.append(-1)  # left = land
++    if not probes:
++        return None
++    tree = STRtree(faces)
++    pidx, fidx = tree.query(probes, predicate="within")
++    votes = [0] * len(faces)
++    for pi, fi in zip(pidx, fidx):
++        votes[fi] += signs[pi]
++    sea = [f for f, v in zip(faces, votes) if v > 0]
++    if not sea:
++        return None
++    return gpd.GeoDataFrame(geometry=sea, crs=crs)
++
++
+ def create_poster(
+     city,
+     country,
+@@ -542,8 +633,8 @@ def create_poster(
+         water = fetch_features(
+             point,
+             compensated_dist,
+-            tags={"natural": ["water", "bay", "strait"], "waterway": "riverbank"},
+-            name="water",
++            tags={"natural": ["water", "bay", "strait"], "waterway": "riverbank", "landuse": ["reservoir", "basin"]},
++            name="water_v2",
+         )
+         pbar.update(1)
+ 
+@@ -581,6 +672,25 @@ def create_poster(
+                 water_polys = water_polys.to_crs(g_proj.graph['crs'])
+             water_polys.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=0.5)
+ 
++    # MAPDROP_WATER_PATCH: sea polygons and river lines
++    try:
++        sea = build_sea_polygons(point, compensated_dist, g_proj.graph['crs'])
++        if sea is not None and not sea.empty:
++            sea.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=0.45)
++            print(f"✓ Sea polygons: {len(sea)}")
++    except Exception as e:
++        print(f"WARN sea build failed: {e}")
++    try:
++        rivers = fetch_features(point, compensated_dist,
++                                tags={"waterway": ["river", "canal"]}, name="rivers")
++        if rivers is not None and not rivers.empty:
++            rl = rivers[rivers.geometry.type.isin(["LineString", "MultiLineString"])]
++            if not rl.empty:
++                rl.to_crs(g_proj.graph['crs']).plot(ax=ax, color=THEME['water'],
++                                                    linewidth=1.6, zorder=0.55)
++    except Exception as e:
++        print(f"WARN rivers failed: {e}")
++
+     if parks is not None and not parks.empty:
+         # Filter to only polygon/multipolygon geometries to avoid point features showing as dots
+         parks_polys = parks[parks.geometry.type.isin(["Polygon", "MultiPolygon"])]
