@@ -1,6 +1,6 @@
 # PLAYBOOK: MAPDROP WEEKLY LISTING PACK
 
-**Venture:** mapdrop | **Owner:** remy | **Version:** 1 | **Last clean run:** never
+**Venture:** mapdrop | **Owner:** remy | **Version:** 2 (2026-11-28) | **Last clean run:** never
 **Standard:** a Haiku model must be able to run this with no other context and pass QC 10/10.
 
 ## 1. Trigger
@@ -145,6 +145,7 @@ cat $W/s4-check.txt
 - **Output file:** the draft under `outputs/drafts/`.
 - **Pass checks:** the save exits 0 (it verifies the second brain, knowledge graph and central memory).
 - **Save:** this is the save.
+- **Last line of the run:** `DELIVERABLE: /opt/openclaw/business/config/workspace/production/mapdrop/outputs/drafts/DATE-SLUG-listing-DRAFT.md` with the real date and slug.
 
 ## 4. Worked example
 Step 2 output when the renderer is missing:
@@ -167,6 +168,69 @@ Money (Etsy fees, any paid tool), accounts (the Etsy shop is his), the price (ow
 
 ## 7. Hard stops
 Never post to Etsy or any site. Never install paid tools. Never state a render exists when step 2 says BLOCKED. Map data credit line stays on every listing (ODbL). Never change the queue Status column in this playbook. AUD only.
+
+## 8. QC checklist (mirrors step_qc.py and proof_of_done.py, tick every line before you hand on)
+- [ ] The file is at least as long as the step's `--min-chars` (every checker output prints a title, `checked_at=` and `rule=` line, so it is never under 200 characters).
+- [ ] Every `--require` pattern in the step's Pass checks is present exactly (they are regular expressions anchored at the start of a line).
+- [ ] No `--forbid` pattern matches.
+- [ ] No em dash anywhere and no spaced en dash used as a dash.
+- [ ] No unfilled placeholder: no all-caps word in square brackets, no double curly braces, none of `TODO`, `TBD`, `FIXME`, `TO CONFIRM`, `lorem ipsum`, `insert link here`.
+- [ ] No generic AI buzzwords (the list in `/opt/openclaw/toolbox/formatters/proof_of_done.py`, for example `delve`, `seamlessly`, `game-changer`).
+- [ ] Step 0 was run for this TASK, so the lessons receipt exists (`--require-lessons-read` fails every step without it).
+- [ ] The final file name contains DRAFT and its first line starts with `# DRAFT` (the night runner rejects anything else).
+- [ ] The step 4 checker printed `CHECK: PASS` (title under 140 characters, 13 different tags of 20 characters or fewer, 150 to 250 description words, the three styles named, the OpenStreetMap credit line, the price line unchanged).
+- [ ] No price, sales figure or claim about the city beyond its name and country.
+
+## 9. Failure handling
+| What failed | What to do |
+|---|---|
+| step_qc.py exit 1 (rework) | Fix only the listed failures in the same file and rerun the same qc line. Never move on with a failed step. |
+| step_qc.py exit 2 (Haiku used 3 tries) | Stop that step. Hand the step, the file and the failure list to a Sonnet session (`--tier sonnet`). |
+| step_save.py exit 1 | A save target failed. Rerun the same sv line once; if it still fails, write it in the last line of the run and continue. |
+| Step 1 finds no queued city | Write `queued_rows=0` in s1-city.txt and stop the run with `DELIVERABLE: NONE no queued city`. Never edit the queue. |
+| Step 2 says BLOCKED | Not a failure. The draft carries `Render status: BLOCKED` and the preview line, and Open items names the missing parts. |
+| Step 4 `CHECK: FAIL` | Fix only the listed items in the draft (count tags, count words with `wc -w`) and rerun step 4. Max 2 reworks, then exit as step_qc exit 2. |
+
+## 10. Filled example of the final deliverable (real 2026-11-25 draft, description shortened)
+```
+# DRAFT (not published): MapDrop listing for Sydney
+Status: DRAFT ONLY, nothing is published or posted
+Render status: BLOCKED
+Price: not set by Anthony yet
+## Title
+Sydney custom map poster, A3 digital download
+## Tags
+1. sydney map
+2. city map poster
+3. sydney poster
+4. custom map print
+5. city map art
+6. map wall art
+7. australia map
+8. printable map
+9. digital download
+10. a3 poster
+11. minimalist map
+12. city wall decor
+13. sydney gift
+## Description
+Bring Sydney onto your wall with this custom map poster. ... Choose from three styles: clean, dark or vibrant. ... Each poster is A3 size and comes as a 300 dpi print file ... This listing is for a digital download only ... Map data © OpenStreetMap contributors.
+Preview images are added when the poster is rendered.
+## Open items for Anthony
+- Set the price in AUD. No price has been chosen, so none is shown.
+- Open the Etsy shop. The shop is Anthony's account and no agent creates it.
+- Install the renderer. The manager states the install size first, then Anthony approves it.
+```
+
+## Free model offload (local Ollama, $0, added 2026-11-28)
+Tool: `python3 /opt/openclaw/toolbox/scripts/ollama_delegate.py JOB ...` (jobs: summarise, classify, extract, rewrite, draft; local llama3.2:3b, $0, no key). It refuses when free memory is under 1.2 GB (exit 2) and says when Ollama is down or the model is missing (exit 3); exit 1 means a model error or timeout. On exit 1, 2 or 3 do that sub-step on Haiku and carry on: never stop the run for it. The free route Spending Gate shares this Ollama, so one call can wait several minutes: keep the default 300 second timeout and offload only sub-steps listed below. Anything a customer or reader will see, every checker, every step_qc.py run and the DELIVERABLE line stay on Haiku.
+
+| Sub-step | Run on | Exact command |
+|---|---|---|
+| Short summary of POSTER-SPEC.md to paste into the worker prompt | Ollama | `python3 /opt/openclaw/toolbox/scripts/ollama_delegate.py summarise --input $VD/outputs/specs/POSTER-SPEC.md --words 120 > $W/spec-summary.txt` |
+| 25 tag ideas for the city (Haiku then picks the best 13 and checks length) | Ollama | `python3 /opt/openclaw/toolbox/scripts/ollama_delegate.py draft --text "City: CITY, Country: COUNTRY. Product: custom map poster, A3 digital download, styles clean, dark, vibrant." --instruction "List 25 Etsy search tags, one per line, each 20 characters or fewer, lowercase, no numbering." > $W/tag-ideas.txt` |
+| Picking the city, render check, checker | Script | the commands in steps 1, 2 and 4 (no model) |
+| Title, 13 final tags, description, Open items | Haiku only | customers read these: never offloaded |
 
 ## Lessons learned
 (lesson_capture.py promote adds lines here. One line per lesson, with its id. The manager rewrites the failing step, not only this list.)
